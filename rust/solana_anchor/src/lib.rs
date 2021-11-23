@@ -26,10 +26,6 @@ pub const MAX_CREATOR_NUM : usize = 6;
 pub const CREATOR_SIZE : usize = 32+1+1;
 pub const MAX_SALE_MANAGER_SIZE : usize = 32+32+32+32+32+8+1+1+1;
 pub const SALE_POT_SIZE : usize = 1+32+1+32+1+32+2+CREATOR_SIZE*MAX_CREATOR_NUM;
-//sell
-//buy
-//redeem
-//withdraw_fund
 
 #[program]
 pub mod solana_anchor {
@@ -150,7 +146,7 @@ pub mod solana_anchor {
 
             creators.push(metaplex_token_metadata::state::Creator{
                 address : c.address,
-                verified : false,
+                verified : c.verified,
                 share : c.share,
             });
         }
@@ -284,6 +280,7 @@ pub mod solana_anchor {
         sale_pot.is_used = false;
         sale_pot.price = _price;
         sale_pot.pool_pot=*ctx.accounts.manager_pot.key;
+        sale_pot.seller_fee_basis_points = metadata.data.seller_fee_basis_points;
         sale_pot.is_primary = !metadata.primary_sale_happened;
         if sale_pot.is_primary {
             sale_pot.seller_verified = true;
@@ -444,12 +441,32 @@ pub mod solana_anchor {
         let sale_manager_info2 = ctx.accounts.sale_manager.to_account_info().clone();
         let sale_manager_key = ctx.accounts.sale_manager.key();
         let sale_manager = &mut ctx.accounts.sale_manager;
+        
+        let nft_manager_token : state::Account = state::Account::unpack_from_slice(&ctx.accounts.nft_manager_token.data.borrow())?;
+        let nft_seller_token : state::Account = state::Account::unpack_from_slice(&ctx.accounts.nft_seller_token.data.borrow())?;
+        let metadata : metaplex_token_metadata::state::Metadata =  metaplex_token_metadata::state::Metadata::from_account_info(&ctx.accounts.metadata)?;
+        if sale_manager.sale_state != 1 {
+            return Err(PoolError::InvalidSaleState.into());
+        }
+        if sale_manager.nft_mint != *ctx.accounts.nft_mint.key {
+            return Err(PoolError::InvalidMintAccount.into());
+        }
+        if nft_manager_token.mint != *ctx.accounts.nft_mint.key {
+            return Err(PoolError::InvalidTokenAccount.into());
+        }
+        if nft_seller_token.mint != *ctx.accounts.nft_mint.key {
+            return Err(PoolError::InvalidTokenAccount.into());
+        }
+        if sale_manager.seller != *ctx.accounts.owner.key {
+            return Err(PoolError::InvalidSeller.into())
+        }        
+
         let sale_manager_seeds = &[
             sale_manager.pool.as_ref(),
             sale_manager.nft_mint.as_ref(),
             &[sale_manager.bump]
         ];
-
+        
         spl_token_transfer(
             TokenTransferParams{
                 source : ctx.accounts.nft_manager_token.clone(),
@@ -476,6 +493,7 @@ pub mod solana_anchor {
             ],
             &[sale_manager_seeds]
         )?;
+        sale_manager.sale_state=0;
         Ok(())
     }
 
@@ -503,7 +521,7 @@ pub mod solana_anchor {
             }
             amount =((sale_pot.price as f64) * (share as f64) / (100.0 as f64)) as u64;
         } else {
-            if sale_pot.seller == *ctx.accounts.owner.key {
+            if sale_pot.seller_verified==false && sale_pot.seller == *ctx.accounts.owner.key {
                 amount = ((sale_pot.price as f64) * ((10000-sale_pot.seller_fee_basis_points) as f64) / (10000 as f64)) as u64;
                 sale_pot.seller_verified = true;
             }
@@ -684,7 +702,6 @@ pub struct InitSaleManager<'info> {
     system_program : Program<'info,System>
 }
 
-
 #[derive(Accounts)]
 pub struct SetMaxPrice<'info> {
     #[account(mut,signer)]
@@ -708,7 +725,7 @@ pub struct MintNft<'info> {
 
     pool : ProgramAccount<'info,Pool>,
 
-    #[account(mut,has_one=owner,seeds=[program_id.as_ref(), pool.key().as_ref(), client.owner.key().as_ref()], bump=client.bump)]
+    #[account(mut,has_one=owner,seeds=[program_id.as_ref(), pool.key().as_ref(), (*owner.key).as_ref()], bump=client.bump)]
     client : ProgramAccount<'info,Client>,
 
     #[account(mut,owner=spl_token::id())]
@@ -736,7 +753,6 @@ pub struct MintNft<'info> {
 
     rent : Sysvar<'info,Rent>,
 }
-
 
 #[derive(Accounts)]
 pub struct ControlPresaleLive<'info> {
@@ -917,4 +933,7 @@ pub enum PoolError {
 
     #[msg("Invalid amount")]
     InvalidAmount,
+
+    #[msg("Invalid seller")]
+    InvalidSeller,
 }
